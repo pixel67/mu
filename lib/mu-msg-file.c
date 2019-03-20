@@ -283,6 +283,9 @@ looks_like_attachment (GMimeObject *part)
 	if (g_mime_content_type_is_type (ctype, "*", "pgp-signature"))
 		return FALSE; /* don't consider as a signature */
 
+	if (g_mime_content_type_is_type (ctype, "*", "pkcs7-signature"))
+		return FALSE; /* don't consider as a signature */
+
 	if (g_mime_content_type_is_type (ctype, "text", "*")) {
 		if (g_mime_content_type_is_type (ctype, "*", "plain") ||
 		    g_mime_content_type_is_type (ctype, "*", "html"))
@@ -302,12 +305,12 @@ looks_like_attachment (GMimeObject *part)
 static void
 msg_cflags_cb (GMimeObject *parent, GMimeObject *part, MuFlags *flags)
 {
-	if (GMIME_IS_MULTIPART_SIGNED(part))
+	if (is_signed(part))
 		*flags |= MU_FLAG_SIGNED;
 
 	/* FIXME: An encrypted part might be signed at the same time.
 	 *        In that case the signed flag is lost. */
-	if (GMIME_IS_MULTIPART_ENCRYPTED(part))
+	if (is_encrypted(part))
 		*flags |= MU_FLAG_ENCRYPTED;
 
 	if (*flags & MU_FLAG_HAS_ATTACH)
@@ -769,6 +772,7 @@ foreach_cb (GMimeObject *parent, GMimeObject *part, ForeachData *fdata)
 	/* invoke the callback function */
 	fdata->user_func (parent, part, fdata->user_data);
 
+	//FIXME: do we need to handle pkcs7 here? is_pkcs7_encrypted(part)
 	/* maybe iterate over decrypted parts */
 	if (fdata->decrypt &&
 	    GMIME_IS_MULTIPART_ENCRYPTED (part)) {

@@ -513,10 +513,11 @@ handle_part (MuMsg *msg, GMimePart *part, GMimeObject *parent,
 			msgpart.part_type |= MU_MSG_PART_TYPE_TEXT_HTML;
 	}
 
-	/* put the verification info in the pgp-signature and every
+	/* put the verification info in the pgp-/smime-signature and every
 	 * descendent of a pgp-encrypted part */
 	msgpart.sig_status_report = NULL;
 	if (g_ascii_strcasecmp (msgpart.subtype, "pgp-signature") == 0 ||
+	    g_ascii_strcasecmp (msgpart.subtype, "pkcs7-signature") == 0 ||
 	    decrypted) {
 		msgpart.sig_status_report =
 			(MuMsgPartSigStatusReport*)
@@ -597,20 +598,115 @@ handle_multipart (MuMsg *msg, GMimeMultipart *mpart, GMimeObject *parent,
 	return res;
 }
 
+static gboolean
+handle_pkcs7_signed (MuMsg *msg, GMimeApplicationPkcs7Mime *part, MuMsgOptions opts, unsigned *index,
+		     gboolean decrypted, MuMsgPartForeachFunc func, gpointer user_data)
+{
+	GError *err;
+	gboolean rv;
+	GMimeObject *dec;
+
+	err = NULL;
+	dec = mu_msg_crypto_verify_pkcs7 ((GMimeApplicationPkcs7Mime*)part, opts, &err);
+	if (err) {
+		g_warning ("error decoding/verifying pkcs7 part: %s", err->message);
+		g_clear_error (&err);
+	}
+
+	if (dec) {
+		// set decrypted to true, so handle_part in child
+		// parts will check for signature status of parents
+		// FIXME: how to achieve the same w/o this hack?
+		rv = handle_mime_object (msg, dec, (GMimeObject *) part,
+					 opts, index, /* decrypted */ 1, func, user_data);
+		g_object_unref (dec);
+	} else {
+		/* FIXME: On failure to decode, the part should be
+		   displayed as attachment. But how to achieve
+		   this?
+		*/
+		return FALSE;
+	}
+
+	return rv;
+
+}
+
+static gboolean
+handle_pkcs7_encrypted (MuMsg *msg, GMimeApplicationPkcs7Mime *part, MuMsgOptions opts, unsigned *index,
+			gboolean decrypted, MuMsgPartForeachFunc func, gpointer user_data)
+{
+	GError *err;
+	gboolean rv;
+	GMimeObject *dec;
+	MuMsgPartPasswordFunc pw_func;
+
+	if (opts & MU_MSG_OPTION_CONSOLE_PASSWORD)
+		pw_func = (MuMsgPartPasswordFunc)get_console_pw;
+	else
+		pw_func = NULL;
+
+
+	err = NULL;
+	dec = mu_msg_crypto_decrypt_pkcs7 ((GMimeApplicationPkcs7Mime*)part, opts, pw_func, NULL, &err);
+	if (err) {
+		g_warning ("error decrypting part: %s", err->message);
+		g_clear_error (&err);
+	}
+
+	if (dec) {
+		rv = handle_mime_object (msg, dec, (GMimeObject *) part,
+					 opts, index, TRUE, func, user_data);
+		g_object_unref (dec);
+	} else {
+		/* On failure to decrypt, handle the same object again
+		 * but disable encryption (should list the encrypted
+		 * part as an attachment)
+		 */
+		g_return_val_if_fail (GMIME_IS_APPLICATION_PKCS7_MIME(part), FALSE);
+
+		rv = handle_mime_object (msg, (GMimeObject *) part, NULL, /* FIXME: is NULL as parent ok? */
+					 (opts ^ MU_MSG_OPTION_DECRYPT), /* disable decryption */
+					 index, FALSE, func, user_data);
+	}
+
+	return rv;
+
+}
 
 static gboolean
 handle_mime_object (MuMsg *msg, GMimeObject *mobj, GMimeObject *parent,
 		    MuMsgOptions opts, unsigned *index, gboolean decrypted,
 		    MuMsgPartForeachFunc func, gpointer user_data)
 {
-	if (GMIME_IS_PART (mobj))
+	if (is_pkcs7_signed(mobj)) {
+		/* In contrast to multipart/signed data, the
+		   (text-)content of such a message can only be
+		   retrieved by verifying the part.  So, even if we're
+		   not verifying the signature, we'll have to go the
+		   same code-path.
+		*/
+		
+		return handle_pkcs7_signed
+			(msg, GMIME_APPLICATION_PKCS7_MIME(mobj),
+			 opts, index, decrypted, func, user_data);
+	}
+	else if ((opts & MU_MSG_OPTION_DECRYPT) &&
+		   is_pkcs7_encrypted(mobj)) {
+		return handle_pkcs7_encrypted
+			(msg, GMIME_APPLICATION_PKCS7_MIME(mobj),
+			 opts, index, decrypted, func, user_data);
+	}
+	else if (GMIME_IS_PART (mobj)){
 		return handle_part
 			(msg, GMIME_PART(mobj), parent,
 			 opts, index, decrypted, func, user_data);
-	else if (GMIME_IS_MESSAGE_PART (mobj))
+	}
+	else if (GMIME_IS_MESSAGE_PART (mobj)) {
 		return handle_message_part
 			(msg, GMIME_MESSAGE_PART(mobj),
 			 parent, opts, index, decrypted, func, user_data);
+	}
 	else if ((opts & MU_MSG_OPTION_VERIFY) &&
 		 GMIME_IS_MULTIPART_SIGNED (mobj)) {
 		check_signature
@@ -618,15 +714,18 @@ handle_mime_object (MuMsg *msg, GMimeObject *mobj, GMimeObject *parent,
 		return handle_multipart
 			(msg, GMIME_MULTIPART (mobj), mobj, opts,
 			 index, decrypted, func, user_data);
-	} else if ((opts & MU_MSG_OPTION_DECRYPT) &&
-		   GMIME_IS_MULTIPART_ENCRYPTED (mobj))
+	}
+	else if ((opts & MU_MSG_OPTION_DECRYPT) &&
+		   GMIME_IS_MULTIPART_ENCRYPTED (mobj)) {
 		return handle_encrypted_part
 			(msg, GMIME_MULTIPART_ENCRYPTED (mobj),
 			 opts, index, func, user_data);
-	else if (GMIME_IS_MULTIPART (mobj))
+	}
+	else if (GMIME_IS_MULTIPART (mobj)) {
 		return handle_multipart
 			(msg, GMIME_MULTIPART (mobj), parent, opts,
 			 index, decrypted, func, user_data);
+	}
 	return TRUE;
 }
 

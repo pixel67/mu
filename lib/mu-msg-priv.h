@@ -119,6 +119,23 @@ void mu_msg_crypto_verify_part (GMimeMultipartSigned *sig,
                                 MuMsgOptions opts,
                                 GError **err);
 
+
+/**
+ * verify the signature of a pkcs7-signed mime object
+ *
+ * @param sig a signed mime object
+ * @param opts message options
+ * @param err receive error information
+ *
+ * @return the decoded (and verified) signed content, tagged with a
+ * status report object, free with
+ * mu_msg_part_sig_status_report_destroy
+ */
+GMimeObject* mu_msg_crypto_verify_pkcs7 (GMimeApplicationPkcs7Mime *sig,
+					 MuMsgOptions opts,
+					 GError **err)
+G_GNUC_MALLOC G_GNUC_WARN_UNUSED_RESULT;
+
 /**
  * decrypt the given encrypted mime multipart
  *
@@ -134,6 +151,34 @@ GMimeObject* mu_msg_crypto_decrypt_part (GMimeMultipartEncrypted *enc, MuMsgOpti
 					 MuMsgPartPasswordFunc func, gpointer user_data,
 					 GError **err)
 					G_GNUC_MALLOC G_GNUC_WARN_UNUSED_RESULT;
+
+
+/**
+ * decrypt the given pkcs7-enveloped(=encrypted) mime object
+ *
+ * @param enc a signed mime object
+ * @param opts message options
+ * @param err receive error information
+ *
+ * @return a status report object, free with mu_msg_part_sig_status_report_destroy
+ */
+GMimeObject* mu_msg_crypto_decrypt_pkcs7 (GMimeApplicationPkcs7Mime *enc,
+				 MuMsgOptions opts,
+				 MuMsgPartPasswordFunc func, gpointer user_data,
+				 GError **err)
+	G_GNUC_MALLOC G_GNUC_WARN_UNUSED_RESULT;
+
+
+/* helper functions for detecting signed/encrypted parts */
+
+/* check if mobj's content type is application/pkcs7-mime type=enveloped-data */
+gboolean is_pkcs7_encrypted(GMimeObject *mobj);
+/* check if mobj's content type is application/pkcs7-mime type=signed-data */
+gboolean is_pkcs7_signed(GMimeObject *mobj);
+/* return if mobj is either multipart/signed or pkcs7 signed-data */
+gboolean is_signed(GMimeObject *mobj);
+/* return if mobj is either multipart/encrypted or pkcs7 encrypted-data */
+gboolean is_encrypted(GMimeObject *mobj);
 
 G_END_DECLS
 

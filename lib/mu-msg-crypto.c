@@ -30,6 +30,7 @@
 
 #include <gmime/gmime.h>
 #include <gmime/gmime-multipart-signed.h>
+#include <gmime/gmime-application-pkcs7-mime.h>
 
 
 static const char*
@@ -93,10 +94,10 @@ get_digestkey_algo_name (GMimeDigestAlgo algo)
 static char*
 get_cert_data (GMimeCertificate *cert)
 {
-	const char /**email,*/ *name, *digest_algo, *pubkey_algo,
+	const char *email, *name, *digest_algo, *pubkey_algo,
 		*keyid, *trust;
 
-	/* email         =  g_mime_certificate_get_email (cert); */
+	email         =  g_mime_certificate_get_email (cert);
 	name  = g_mime_certificate_get_name (cert);
 	keyid = g_mime_certificate_get_key_id (cert);
 
@@ -118,7 +119,7 @@ get_cert_data (GMimeCertificate *cert)
 
 	return g_strdup_printf (
 		"signer:%s, key:%s (%s,%s), trust:%s",
-		name ? name : "?",
+		name ? name : (email ? email :"?"),
 		/* email ? email : "?", */
 		keyid, pubkey_algo, digest_algo,
 		trust);
@@ -136,25 +137,29 @@ get_verdict_report (GMimeSignature *msig)
 
 	sigstat = g_mime_signature_get_status (msig);
 	if (sigstat & GMIME_SIGNATURE_STATUS_ERROR_MASK)
-		status = "error";
+            status = "error";
 	else if (sigstat & GMIME_SIGNATURE_STATUS_RED)
 		status = "bad";
-	else if (sigstat & GMIME_SIGNATURE_STATUS_GREEN)
+	else if ((sigstat & GMIME_SIGNATURE_STATUS_GREEN) ||
+                 (sigstat == GMIME_SIGNATURE_STATUS_VALID))
 		status = "good";
-	else
-		g_return_val_if_reached (NULL);
-
+        else if (sigstat == 0)
+            status = "WTF?";
+	else {
+            g_return_val_if_reached (NULL);
+        }
+        
 	t = g_mime_signature_get_created (msig);
-	created = (t == 0 || t == (time_t)-1) ? "?" : mu_date_str_s ("%x", t);
-
+	created = (t == 0 || t == (time_t)-1) ? "?" : mu_date_str ("%x", t);
+ 
 	t = g_mime_signature_get_expires (msig);
-	expires = (t == 0 || t == (time_t)-1) ? "?" : mu_date_str_s ("%x", t);
+	expires = (t == 0 || t == (time_t)-1) ? "?" : mu_date_str ("%x", t);
 
 	certdata = get_cert_data (g_mime_signature_get_certificate (msig));
 	report = g_strdup_printf ("%s; created:%s, expires:%s, %s",
 				  status, created, expires,
 				  certdata ? certdata : "?");
-	g_free (certdata);
+        g_free (certdata);
 	return report;
 }
 
@@ -260,6 +265,47 @@ tag_with_sig_status(GObject *part,
 }
 
 
+/* helper functions for detecting signed/encrypted parts */
+
+/* check if mobj's content type is application/pkcs7-mime type=enveloped-data */
+gboolean
+is_pkcs7_encrypted(GMimeObject *mobj)
+{
+    return (g_mime_content_type_is_type(g_mime_object_get_content_type(mobj),
+					    "application", "pkcs7-mime") &&
+            (g_mime_application_pkcs7_mime_get_smime_type((GMimeApplicationPkcs7Mime* )mobj) == GMIME_SECURE_MIME_TYPE_ENVELOPED_DATA));
+
+}
+
+/* check if mobj's content type is application/pkcs7-mime type=signed-data */
+gboolean
+is_pkcs7_signed(GMimeObject *mobj)
+{
+	return (g_mime_content_type_is_type(g_mime_object_get_content_type(mobj),
+					    "application", "pkcs7-mime") &&
+		(g_mime_application_pkcs7_mime_get_smime_type((GMimeApplicationPkcs7Mime* )mobj) == GMIME_SECURE_MIME_TYPE_SIGNED_DATA));
+
+}
+
+
+/* return if mobj is either multipart/signed or pkcs7 signed-data */
+gboolean
+is_signed(GMimeObject *mobj)
+{
+	return (GMIME_IS_MULTIPART_SIGNED(mobj) ||
+		is_pkcs7_signed(mobj));
+}
+
+/* return if mobj is either multipart/encrypted or pkcs7 encrypted-data */
+gboolean
+is_encrypted(GMimeObject *mobj)
+{
+	return (GMIME_IS_MULTIPART_ENCRYPTED(mobj) ||
+		is_pkcs7_encrypted(mobj));
+}
+
+
+
 void
 mu_msg_crypto_verify_part (GMimeMultipartSigned *sig, MuMsgOptions opts,
 			   GError **err)
@@ -283,6 +329,55 @@ mu_msg_crypto_verify_part (GMimeMultipartSigned *sig, MuMsgOptions opts,
 
 	/* tag this part with the signature status check */
 	tag_with_sig_status(G_OBJECT(sig), report);
+}
+
+GMimeObject*
+mu_msg_crypto_verify_pkcs7 (GMimeApplicationPkcs7Mime *sig, MuMsgOptions opts,
+                            GError **err)
+{
+    /* the signature status */
+    MuMsgPartSigStatusReport *report;
+    GMimeSignatureList *sigs;
+    GMimeObject *entity;
+
+    g_return_val_if_fail (GMIME_IS_APPLICATION_PKCS7_MIME(sig),NULL);
+
+    entity = NULL;
+    sigs = g_mime_application_pkcs7_mime_verify (sig, GMIME_VERIFY_NONE, &entity, err);
+
+    if(!entity) {
+        mu_util_g_set_error (err, MU_ERROR_CRYPTO,
+                             "pkcs7 decoding failed");
+        if(sigs)
+            g_mime_signature_list_clear (sigs);
+
+        return NULL;
+    } else {
+    
+        if((opts & MU_MSG_OPTION_VERIFY)) {
+            if (!sigs) {
+                if (err && !*err)
+                    mu_util_g_set_error (err, MU_ERROR_CRYPTO,
+                                         "verification failed");
+                return entity;
+            }
+
+            report = get_status_report (sigs);
+            if(report) {
+                printf("verify report created.\n");
+            }
+            g_mime_signature_list_clear (sigs);
+
+            /* tag this part with the signature status check */
+            /* FIXME: which mime object should be tagged? */
+            tag_with_sig_status(G_OBJECT(entity), report);
+            tag_with_sig_status(G_OBJECT(sig), report);
+
+        }
+    }
+    g_mime_signature_list_clear (sigs);
+
+    return entity;
 }
 
 
@@ -337,4 +432,60 @@ mu_msg_crypto_decrypt_part (GMimeMultipartEncrypted *enc, MuMsgOptions opts,
 	}
 
 	return dec;
+}
+
+static inline void
+check_decrypt_result_pkcs7(GMimeApplicationPkcs7Mime *part, GMimeDecryptResult *res,
+		     GError **err)
+{
+    GMimeSignatureList *sigs;
+    MuMsgPartSigStatusReport *report;
+
+    if (res) {
+        /* Check if the decrypted part had any embed signatures */
+        /* don't complain if it doesn't. FIXME: S/MIME encrypted mails
+         * don't have signatures as part of the encrypted data. the
+         * signed content is inside as separate mime objects. */
+        sigs = g_mime_decrypt_result_get_signatures (res);
+        if (sigs) {
+            report = get_status_report (sigs);
+            g_mime_signature_list_clear (sigs);
+
+            /* tag this part with the signature status check */
+            tag_with_sig_status(G_OBJECT(part), report);
+        }
+
+        g_object_unref (res);
+    }
+
+}
+
+
+GMimeObject*  /* this is declared in mu-msg-priv.h */
+mu_msg_crypto_decrypt_pkcs7 (GMimeApplicationPkcs7Mime *enc,
+                             MuMsgOptions opts,
+                             MuMsgPartPasswordFunc func, gpointer user_data,
+                             GError **err)
+{
+
+    GMimeObject *dec;
+    GMimeDecryptResult *res;
+
+    g_return_val_if_fail (GMIME_IS_APPLICATION_PKCS7_MIME(enc), NULL);
+
+    res = NULL;
+    dec = g_mime_application_pkcs7_mime_decrypt (enc, GMIME_DECRYPT_NONE, NULL,
+                                              &res, err);
+    check_decrypt_result_pkcs7(enc, res, err);
+
+    if (!dec) {
+        if (err && !*err) {
+            mu_util_g_set_error (err, MU_ERROR_CRYPTO,
+                                 "decryption failed");
+        }
+        return NULL;
+    }
+
+    return dec;
+
 }
